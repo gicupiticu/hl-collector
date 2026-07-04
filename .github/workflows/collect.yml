@@ -23,8 +23,12 @@ jobs:
         run: python hl_collector.py
       - name: Commit data
         run: |
-          git config user.name "collector-bot"
-          git config user.email "bot@users.noreply.github.com"
-          git add data/snapshot.csv
-          git diff --cached --quiet || git commit -m "snapshot $(date -u +%F)"
-          git push
+          if [ -f data/snapshot.csv ]; then
+            git config user.name "collector-bot"
+            git config user.email "bot@users.noreply.github.com"
+            git add data/snapshot.csv
+            git diff --cached --quiet || git commit -m "snapshot $(date -u +%F)"
+            git push
+          else
+            echo "no data file (script ran outside the 5:25pm window) - nothing to commit"
+          fi
