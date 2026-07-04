@@ -64,8 +64,8 @@ def candles(coin, interval, start, end):
 def wait_until_525pm_ny():
     now = datetime.now(NY)
     target = now.replace(hour=17, minute=25, second=0, microsecond=0)
-    if now > target + timedelta(minutes=30):
-        print("outside window, exiting (probably the wrong DST cron)")
+    if now > target + timedelta(minutes=95):
+        print("outside window, exiting (wrong DST cron or too late)")
         sys.exit(0)
     if now < target - timedelta(minutes=45):
         print("too early, exiting (probably the wrong DST cron)")
@@ -74,6 +74,9 @@ def wait_until_525pm_ny():
     if wait > 0:
         print(f"waiting {wait:.0f}s until 17:25 NY")
         time.sleep(wait)
+    else:
+        print(f"late start ({now:%H:%M} NY) - collecting immediately, "
+              "ts_ms records the true time")
 
 
 def f(x, nd=6):
@@ -251,7 +254,6 @@ def backfill(rows):
 
 
 def main():
-    wait_until_525pm_ny()
     os.makedirs("data", exist_ok=True)
     old = []
     if os.path.exists(CSV_PATH):
@@ -259,8 +261,9 @@ def main():
             old = list(csv.DictReader(fh))
     today = datetime.now(NY).strftime("%Y-%m-%d")
     if any(r["date"] == today for r in old):
-        print("already collected today")
+        print("already collected today - backfilling outcomes only")
     else:
+        wait_until_525pm_ny()
         old += collect_snapshot()
     old = backfill(old)
     with open(CSV_PATH, "w", newline="") as fh:
