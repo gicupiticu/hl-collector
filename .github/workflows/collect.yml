@@ -1,0 +1,30 @@
+name: Hyperliquid daily snapshot
+
+on:
+  schedule:
+    # Two crons cover DST: script itself exits unless it's ~17:25 New York.
+    - cron: '55 20 * * *'   # 4:55pm EDT (summer) -> script waits to 5:25pm
+    - cron: '55 21 * * *'   # 4:55pm EST (winter) -> script waits to 5:25pm
+  workflow_dispatch: {}      # manual run button for testing
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run collector
+        run: python hl_collector.py
+      - name: Commit data
+        run: |
+          git config user.name "collector-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add data/snapshot.csv
+          git diff --cached --quiet || git commit -m "snapshot $(date -u +%F)"
+          git push
