@@ -1,5 +1,5 @@
 """
-Hyperliquid daily 5:25pm ET snapshot collector.
+Hyperliquid daily 5:50pm ET snapshot collector (entry design: short 6:00pm).
 Runs on GitHub Actions (see collect.yml). Appends one row per live perp coin
 to data/snapshot.csv and backfills outcomes for earlier rows once their
 observation window has passed.
@@ -19,6 +19,9 @@ Fields per row (features observable AT snapshot time only - no lookahead):
 Outcomes (backfilled next run): r30m, r1h, r2h, r3h, r6h, r24h,
   mae3h (max high in 3h vs snapshot close - worst case for a short),
   fund_paid_3h (cum funding over 3h; positive = short RECEIVES).
+6pm-entry outcomes (trade design: select ~5:25-5:45pm, SHORT at 18:00 NY):
+  e18_r1h, e18_r2h, e18_r3h (returns from the 18:00 NY close),
+  e18_mae3h (max high within 3h vs the 18:00 close - stop-sizing number).
 """
 
 import json
@@ -37,7 +40,8 @@ FIELDS = ("date,ts_ms,coin,ret12,ret24,ret7d,day2_ret24,pump_max5m,"
           "mins_since_high12,retrace_from_high,vwap_dist,volr_15m,volr_1h,"
           "volr_2h,vol24_usd,oi_usd,funding_1h,funding_8h_sum,premium,"
           "spread_bps,depth_bid_05,depth_ask_05,btc_ret24,eth_ret24,"
-          "breadth_up5,rank24,r30m,r1h,r2h,r3h,r6h,r24h,mae3h,fund_paid_3h"
+          "breadth_up5,rank24,r30m,r1h,r2h,r3h,r6h,r24h,mae3h,fund_paid_3h,"
+          "e18_r1h,e18_r2h,e18_r3h,e18_mae3h"
           ).split(",")
 
 
@@ -62,8 +66,9 @@ def candles(coin, interval, start, end):
 
 
 def wait_until_525pm_ny():
+    # target is 17:50 NY: features scanned 10 min before the 18:00 entry
     now = datetime.now(NY)
-    target = now.replace(hour=17, minute=25, second=0, microsecond=0)
+    target = now.replace(hour=17, minute=50, second=0, microsecond=0)
     if now > target + timedelta(minutes=95):
         print("outside window, exiting (wrong DST cron or too late)")
         sys.exit(0)
@@ -203,7 +208,8 @@ def collect_snapshot():
             "btc_ret24": f(btc), "eth_ret24": f(eth),
             "breadth_up5": breadth, "rank24": r.get("rank24", ""),
             "r30m": "", "r1h": "", "r2h": "", "r3h": "", "r6h": "",
-            "r24h": "", "mae3h": "", "fund_paid_3h": ""})
+            "r24h": "", "mae3h": "", "fund_paid_3h": "",
+            "e18_r1h": "", "e18_r2h": "", "e18_r3h": "", "e18_mae3h": ""})
     return out
 
 
@@ -250,6 +256,32 @@ def backfill(rows):
             fp = sum(float(x["fundingRate"]) for x in fh
                      if ts < x["time"] <= ts + 3 * H)
             r["fund_paid_3h"] = f(fp)
+
+            # 6pm-NY-entry outcomes (bar opening 17:55 NY closes at 18:00)
+            try:
+                d = datetime.strptime(r["date"], "%Y-%m-%d")
+                e18 = datetime(d.year, d.month, d.day, 17, 55, tzinfo=NY)
+                et = int(e18.timestamp() * 1000)
+                b18 = cmap.get(et)
+                if b18:
+                    epx = float(b18["c"])
+
+                    def eat(mins):
+                        b = cmap.get(et + mins * 60 * 1000)
+                        return (None if not b or epx <= 0
+                                else float(b["c"]) / epx - 1)
+                    r["e18_r1h"] = f(eat(60))
+                    r["e18_r2h"] = f(eat(120))
+                    r["e18_r3h"] = f(eat(180))
+                    emae = None
+                    for m in range(5, 185, 5):
+                        b = cmap.get(et + m * 60 * 1000)
+                        if b:
+                            hr_ = float(b["h"]) / epx - 1
+                            emae = hr_ if emae is None else max(emae, hr_)
+                    r["e18_mae3h"] = f(emae)
+            except Exception:
+                pass
     return rows
 
 
