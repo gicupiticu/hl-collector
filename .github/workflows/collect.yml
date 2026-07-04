@@ -2,9 +2,13 @@ name: Hyperliquid daily snapshot
 
 on:
   schedule:
-    # Two crons cover DST: script itself exits unless it's ~17:25 New York.
-    - cron: '55 20 * * *'   # 4:55pm EDT (summer) -> script waits to 5:25pm
-    - cron: '55 21 * * *'   # 4:55pm EST (winter) -> script waits to 5:25pm
+    # Multiple attempts because GitHub cron is unreliable; the script exits
+    # fast if it already collected today or is outside ~16:40-19:00 New York.
+    - cron: '55 20 * * *'   # 4:55pm EDT / 3:55pm EST
+    - cron: '25 21 * * *'   # 5:25pm EDT / 4:25pm EST
+    - cron: '55 21 * * *'   # 5:55pm EDT / 4:55pm EST
+    - cron: '25 22 * * *'   # 6:25pm EDT / 5:25pm EST
+    - cron: '55 22 * * *'   # 6:55pm EDT / 5:55pm EST
   workflow_dispatch: {}      # manual run button for testing
 
 permissions:
@@ -30,5 +34,5 @@ jobs:
             git diff --cached --quiet || git commit -m "snapshot $(date -u +%F)"
             git push
           else
-            echo "no data file (script ran outside the 5:25pm window) - nothing to commit"
+            echo "no data file - nothing to commit"
           fi
