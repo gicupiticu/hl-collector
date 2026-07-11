@@ -3,13 +3,11 @@ name: Hyperliquid daily snapshot
 on:
   schedule:
     # Target: snapshot 5:50pm NY (entry design: short at 6:00pm NY).
-    # Multiple attempts because GitHub cron is unreliable; the script exits
-    # fast if it already collected today or is outside ~17:05-19:25 New York.
-    - cron: '20 21 * * *'   # 5:20pm EDT / 4:20pm EST
-    - cron: '50 21 * * *'   # 5:50pm EDT / 4:50pm EST
-    - cron: '20 22 * * *'   # 6:20pm EDT / 5:20pm EST
-    - cron: '50 22 * * *'   # 6:50pm EDT / 5:50pm EST
-    - cron: '10 23 * * *'   # 7:10pm EDT / 6:10pm EST
+    # HOURLY attempts: GitHub defers cron on new/low-activity repos by many
+    # hours (observed: 12h+, batched). Hourly firing means some attempts land
+    # inside the ~17:05-19:25 NY window; all others exit in seconds.
+    # Backfill of outcome columns happens on every attempt.
+    - cron: '15 * * * *'
   workflow_dispatch: {}      # manual run button for testing
 
 permissions:
