@@ -285,23 +285,29 @@ def backfill(rows):
     return rows
 
 
+def save(rows):
+    with open(CSV_PATH, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=FIELDS, restval="")
+        w.writeheader()
+        w.writerows(rows)
+
+
 def main():
     os.makedirs("data", exist_ok=True)
     old = []
     if os.path.exists(CSV_PATH):
         with open(CSV_PATH, newline="") as fh:
             old = list(csv.DictReader(fh))
+    # backfill on EVERY run, regardless of time of day
+    old = backfill(old)
+    save(old)
     today = datetime.now(NY).strftime("%Y-%m-%d")
     if any(r["date"] == today for r in old):
-        print("already collected today - backfilling outcomes only")
+        print("already collected today")
     else:
-        wait_until_525pm_ny()
+        wait_until_525pm_ny()   # exits unless ~17:05-19:25 NY
         old += collect_snapshot()
-    old = backfill(old)
-    with open(CSV_PATH, "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=FIELDS)
-        w.writeheader()
-        w.writerows(old)
+        save(old)
     print(f"total rows: {len(old)}")
 
 
