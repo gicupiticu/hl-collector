@@ -1,5 +1,8 @@
 """
-Hyperliquid daily 5:50pm ET snapshot collector (entry design: short 6:00pm).
+Hyperliquid daily snapshot collector - two-arm scan-timing A/B:
+  arm '1730': scan 5:30pm NY, entry (short) 5:45pm NY -> ent_* outcomes
+  arm '1750': scan 5:50pm NY, entry (short) 6:00pm NY -> ent_* outcomes
+  e18_* outcomes stay anchored at 6:00pm for ALL rows (cross-arm comparability).
 Runs on GitHub Actions (see collect.yml). Appends one row per live perp coin
 to data/snapshot.csv and backfills outcomes for earlier rows once their
 observation window has passed.
@@ -36,13 +39,17 @@ from zoneinfo import ZoneInfo
 API = "https://api.hyperliquid.xyz/info"
 NY = ZoneInfo("America/New_York")
 CSV_PATH = "data/snapshot.csv"
-FIELDS = ("date,ts_ms,coin,ret12,ret24,ret7d,day2_ret24,pump_max5m,"
+FIELDS = ("date,snap,ts_ms,coin,ret12,ret24,ret7d,day2_ret24,pump_max5m,"
           "mins_since_high12,retrace_from_high,vwap_dist,volr_15m,volr_1h,"
           "volr_2h,vol24_usd,oi_usd,funding_1h,funding_8h_sum,premium,"
           "spread_bps,depth_bid_05,depth_ask_05,btc_ret24,eth_ret24,"
           "breadth_up5,rank24,r30m,r1h,r2h,r3h,r6h,r24h,mae3h,fund_paid_3h,"
-          "e18_r1h,e18_r2h,e18_r3h,e18_mae3h"
+          "e18_r1h,e18_r2h,e18_r3h,e18_mae3h,"
+          "ent_r1h,ent_r2h,ent_r3h,ent_mae3h"
           ).split(",")
+
+# entry anchor (NY hour, minute) per scan label; default 18:00 for old rows
+ENTRY = {"1730": (17, 45), "1750": (18, 0), "": (18, 0)}
 
 
 def post(body, retries=3):
@@ -65,30 +72,39 @@ def candles(coin, interval, start, end):
                          "startTime": start, "endTime": end}}) or []
 
 
-def wait_until_525pm_ny():
-    # target is 17:50 NY: features scanned 10 min before the 18:00 entry
+# Two daily scans, both graded against the same 18:00 NY entry:
+#   '1730' = 5:30pm NY scan, '1750' = 5:50pm NY scan (A/B of scan timing)
+SNAPS = [(17, 30, "1730"), (17, 50, "1750")]
+GRACE_MIN = 95      # late-start tolerance per target
+EARLY_MIN = 45      # how early a runner may arrive and wait
+
+
+def reach_target(hh, mm):
+    """Return True when it's time to collect for this target.
+    Waits if early-but-close; returns False if the window was missed."""
     now = datetime.now(NY)
-    target = now.replace(hour=17, minute=50, second=0, microsecond=0)
-    if now > target + timedelta(minutes=95):
-        print("outside window, exiting (wrong DST cron or too late)")
-        sys.exit(0)
-    if now < target - timedelta(minutes=45):
-        print("too early, exiting (probably the wrong DST cron)")
-        sys.exit(0)
+    target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if now > target + timedelta(minutes=GRACE_MIN):
+        print(f"{hh}:{mm:02d} window missed")
+        return False
+    if now < target - timedelta(minutes=EARLY_MIN):
+        print(f"too early for {hh}:{mm:02d}, skipping")
+        return False
     wait = (target - now).total_seconds()
     if wait > 0:
-        print(f"waiting {wait:.0f}s until 17:25 NY")
+        print(f"waiting {wait:.0f}s until {hh}:{mm:02d} NY")
         time.sleep(wait)
     else:
-        print(f"late start ({now:%H:%M} NY) - collecting immediately, "
-              "ts_ms records the true time")
+        print(f"late start ({now:%H:%M} NY) for {hh}:{mm:02d} - "
+              "collecting now, ts_ms records true time")
+    return True
 
 
 def f(x, nd=6):
     return "" if x is None else f"{x:.{nd}f}"
 
 
-def collect_snapshot():
+def collect_snapshot(label):
     meta, ctxs = post({"type": "metaAndAssetCtxs"})
     uni = meta["universe"]
     now_ms = int(time.time() * 1000)
@@ -193,7 +209,7 @@ def collect_snapshot():
     out = []
     for r in rows.values():
         out.append({
-            "date": date, "ts_ms": now_ms, "coin": r["coin"],
+            "date": date, "snap": label, "ts_ms": now_ms, "coin": r["coin"],
             **{k: f(r.get(k)) for k in
                ("ret12", "ret24", "ret7d", "day2_ret24", "pump_max5m",
                 "retrace_from_high", "vwap_dist", "volr_15m", "volr_1h",
@@ -209,7 +225,8 @@ def collect_snapshot():
             "breadth_up5": breadth, "rank24": r.get("rank24", ""),
             "r30m": "", "r1h": "", "r2h": "", "r3h": "", "r6h": "",
             "r24h": "", "mae3h": "", "fund_paid_3h": "",
-            "e18_r1h": "", "e18_r2h": "", "e18_r3h": "", "e18_mae3h": ""})
+            "e18_r1h": "", "e18_r2h": "", "e18_r3h": "", "e18_mae3h": "",
+            "ent_r1h": "", "ent_r2h": "", "ent_r3h": "", "ent_mae3h": ""})
     return out
 
 
@@ -257,31 +274,41 @@ def backfill(rows):
                      if ts < x["time"] <= ts + 3 * H)
             r["fund_paid_3h"] = f(fp)
 
-            # 6pm-NY-entry outcomes (bar opening 17:55 NY closes at 18:00)
-            try:
-                d = datetime.strptime(r["date"], "%Y-%m-%d")
-                e18 = datetime(d.year, d.month, d.day, 17, 55, tzinfo=NY)
-                et = int(e18.timestamp() * 1000)
-                b18 = cmap.get(et)
-                if b18:
-                    epx = float(b18["c"])
+            # entry-anchored outcomes. The bar CLOSING at HH:MM opens 5 min
+            # earlier. e18_* = fixed 18:00 anchor (all rows, comparability);
+            # ent_* = the row's own arm: 17:45 for snap '1730', 18:00 for
+            # '1750' and legacy rows.
+            def anchor_outcomes(hh, mm, prefix):
+                try:
+                    d = datetime.strptime(r["date"], "%Y-%m-%d")
+                    a = datetime(d.year, d.month, d.day, hh, mm,
+                                 tzinfo=NY) - timedelta(minutes=5)
+                    et = int(a.timestamp() * 1000)
+                    b0 = cmap.get(et)
+                    if not b0:
+                        return
+                    epx = float(b0["c"])
 
                     def eat(mins):
                         b = cmap.get(et + mins * 60 * 1000)
                         return (None if not b or epx <= 0
                                 else float(b["c"]) / epx - 1)
-                    r["e18_r1h"] = f(eat(60))
-                    r["e18_r2h"] = f(eat(120))
-                    r["e18_r3h"] = f(eat(180))
+                    r[prefix + "r1h"] = f(eat(60))
+                    r[prefix + "r2h"] = f(eat(120))
+                    r[prefix + "r3h"] = f(eat(180))
                     emae = None
                     for m in range(5, 185, 5):
                         b = cmap.get(et + m * 60 * 1000)
                         if b:
                             hr_ = float(b["h"]) / epx - 1
                             emae = hr_ if emae is None else max(emae, hr_)
-                    r["e18_mae3h"] = f(emae)
-            except Exception:
-                pass
+                    r[prefix + "mae3h"] = f(emae)
+                except Exception:
+                    pass
+
+            anchor_outcomes(18, 0, "e18_")
+            eh, em = ENTRY.get(r.get("snap", ""), (18, 0))
+            anchor_outcomes(eh, em, "ent_")
     return rows
 
 
@@ -302,12 +329,14 @@ def main():
     old = backfill(old)
     save(old)
     today = datetime.now(NY).strftime("%Y-%m-%d")
-    if any(r["date"] == today for r in old):
-        print("already collected today")
-    else:
-        wait_until_525pm_ny()   # exits unless ~17:05-19:25 NY
-        old += collect_snapshot()
-        save(old)
+    for hh, mm, label in SNAPS:
+        if any(r["date"] == today and r.get("snap", "") == label
+               for r in old):
+            print(f"snap {label} already collected today")
+            continue
+        if reach_target(hh, mm):
+            old += collect_snapshot(label)
+            save(old)
     print(f"total rows: {len(old)}")
 
 
